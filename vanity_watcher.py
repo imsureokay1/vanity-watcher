@@ -60,6 +60,26 @@ def home():
     }
 
 
+@app.route("/test-gateway")
+def test_gateway():
+    """Diagnostic: hit a totally different, public Discord endpoint
+    (no auth needed) to check if THIS server's IP is blocked at the
+    network level in general, or just for the invite endpoint."""
+    try:
+        resp = requests.get(
+            "https://discord.com/api/v10/gateway",
+            headers=REQUEST_HEADERS,
+            timeout=10,
+        )
+        return {
+            "endpoint": "https://discord.com/api/v10/gateway",
+            "status_code": resp.status_code,
+            "body": resp.text[:500],
+        }
+    except requests.RequestException as e:
+        return {"error": str(e)}
+
+
 def is_available(code: str):
     resp = requests.get(
         INVITE_API.format(code=code), headers=REQUEST_HEADERS, timeout=10
