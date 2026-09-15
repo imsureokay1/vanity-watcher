@@ -1,11 +1,17 @@
 """
-Discord Vanity URL Availability Watcher (Render-ready version, authenticated)
+Discord Vanity URL Availability Watcher (fingerprint-evading version)
 -------------------------------------------------------------------------------
-Runs a tiny web server (so Render's free tier will host it) while a
-background thread keeps polling Discord's invite-resolve endpoint for
-one or more vanity codes.
+Runs a tiny web server (so free hosts like Northflank/Render will host it)
+while a background thread keeps polling Discord's invite-resolve endpoint
+for one or more vanity codes.
 
-- Uses an authenticated Discord bot token to avoid shared-IP rate limits.
+Key fix: uses curl_cffi (which impersonates a real Chrome browser's TLS/HTTP
+fingerprint) instead of plain `requests` for calls to discord.com. Cloudflare
+was blocking us based on the recognizable "bot-like" fingerprint of Python's
+requests library, regardless of IP address or proxy.
+
+- Uses an authenticated Discord bot token.
+- Optionally routes through a residential proxy (PROXY_URL env var).
 - Checks every CHECK_INTERVAL_SECONDS (default: 5 min).
 - Sends a STATUS UPDATE to the webhook every STATUS_UPDATE_EVERY_N_CHECKS
   checks (default: every 12th check = hourly), with no ping.
@@ -16,7 +22,8 @@ one or more vanity codes.
 import os
 import time
 import threading
-import requests
+from curl_cffi import requests as cf_requests
+import requests  # still used for the plain webhook POSTs, which aren't blocked
 from flask import Flask
 
 # --- Config ---
@@ -25,23 +32,16 @@ WEBHOOK_URL = "https://discord.com/api/webhooks/1549272234005237870/pyDj7Uyca3X3
 CHECK_INTERVAL_SECONDS = 60 * 5  # 5 minutes between checks
 STATUS_UPDATE_EVERY_N_CHECKS = 12  # 12 checks * 5 min = status update every hour
 
-# The bot token is read from a Render/Northflank environment variable
-# named DISCORD_BOT_TOKEN, never hardcoded here.
 BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 
-# The residential proxy connection string is read from an environment
-# variable named PROXY_URL, in the format:
-#   http://username:password@gw.dataimpulse.com:823
-# Never hardcode this — set it in Northflank's Environment settings.
+# Optional residential proxy, format: http://user:pass@gw.dataimpulse.com:823
 PROXY_URL = os.environ.get("PROXY_URL", "")
 PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
 
 INVITE_API = "https://discord.com/api/v10/invites/{code}"
-REQUEST_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/128.0 Safari/537.36",
-    "Accept": "application/json",
-}
+GATEWAY_API = "https://discord.com/api/v10/gateway"
+
+REQUEST_HEADERS = {"Accept": "application/json"}
 if BOT_TOKEN:
     REQUEST_HEADERS["Authorization"] = f"Bot {BOT_TOKEN}"
 
@@ -53,6 +53,14 @@ status = {
     "authenticated": bool(BOT_TOKEN),
     "proxy_enabled": bool(PROXY_URL),
 }
+
+
+def cf_get(url):
+    """GET request impersonating a real Chrome browser's fingerprint."""
+    kwargs = {"headers": REQUEST_HEADERS, "timeout": 15, "impersonate": "chrome124"}
+    if PROXIES:
+        kwargs["proxies"] = PROXIES
+    return cf_requests.get(url, **kwargs)
 
 
 @app.route("/")
@@ -70,33 +78,23 @@ def home():
 
 @app.route("/test-gateway")
 def test_gateway():
-    """Diagnostic: hit a totally different, public Discord endpoint
-    (no auth needed) to check if THIS server's IP is blocked at the
-    network level in general, or just for the invite endpoint."""
+    """Diagnostic: hit a public Discord endpoint using the impersonated
+    Chrome fingerprint, to check if this fixes the 403/40333 block."""
     try:
-        resp = requests.get(
-            "https://discord.com/api/v10/gateway",
-            headers=REQUEST_HEADERS,
-            proxies=PROXIES,
-            timeout=15,
-        )
+        resp = cf_get(GATEWAY_API)
         return {
-            "endpoint": "https://discord.com/api/v10/gateway",
+            "endpoint": GATEWAY_API,
             "status_code": resp.status_code,
             "body": resp.text[:500],
             "via_proxy": bool(PROXY_URL),
+            "method": "curl_cffi (chrome124 impersonation)",
         }
-    except requests.RequestException as e:
+    except Exception as e:
         return {"error": str(e)}
 
 
 def is_available(code: str):
-    resp = requests.get(
-        INVITE_API.format(code=code),
-        headers=REQUEST_HEADERS,
-        proxies=PROXIES,
-        timeout=15,
-    )
+    resp = cf_get(INVITE_API.format(code=code))
     if resp.status_code == 200:
         return False
     if resp.status_code == 404:
@@ -140,13 +138,6 @@ def send_availability_ping(code: str):
 
 
 def watch_loop():
-    if not BOT_TOKEN:
-        print(
-            "WARNING: DISCORD_BOT_TOKEN not set. Requests will be unauthenticated "
-            "and may hit shared-IP rate limits on Render.",
-            flush=True,
-        )
-
     remaining = set(VANITY_CODES)
     checks_done = 0
 
@@ -163,7 +154,7 @@ def watch_loop():
                     remaining.discard(code)
                 elif result is False:
                     print(f"[{code}] Still taken.", flush=True)
-            except requests.RequestException as e:
+            except Exception as e:
                 print(f"[{code}] Request error: {e}", flush=True)
                 results[code] = None
 
