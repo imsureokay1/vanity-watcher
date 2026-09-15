@@ -26,6 +26,13 @@ CHECK_INTERVAL_SECONDS = 60 * 5  # 5 minutes between checks
 STATUS_UPDATE_EVERY_N_CHECKS = 12  # 12 checks * 5 min = status update every hour
 
 INVITE_API = "https://discord.com/api/v10/invites/{code}"
+# A real browser User-Agent avoids some hosts getting blocked/rate-limited
+# by Discord's edge protection when requests come from datacenter IPs.
+REQUEST_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/128.0 Safari/537.36",
+    "Accept": "application/json",
+}
 
 app = Flask(__name__)
 status = {"last_check": None, "remaining": list(VANITY_CODES), "checks_done": 0}
@@ -43,12 +50,21 @@ def home():
 
 
 def is_available(code: str):
-    resp = requests.get(INVITE_API.format(code=code), timeout=10)
+    resp = requests.get(
+        INVITE_API.format(code=code), headers=REQUEST_HEADERS, timeout=10
+    )
     if resp.status_code == 200:
         return False
     if resp.status_code == 404:
         return True
-    print(f"[{code}] Unexpected status {resp.status_code}: {resp.text[:200]}")
+    if resp.status_code == 429:
+        retry_after = resp.headers.get("Retry-After", "unknown")
+        print(f"[{code}] Rate limited (429). Retry-After: {retry_after}", flush=True)
+        return None
+    print(
+        f"[{code}] Unexpected status {resp.status_code}: {resp.text[:300]}",
+        flush=True,
+    )
     return None
 
 
@@ -93,13 +109,13 @@ def watch_loop():
                 results[code] = result
                 status["last_check"] = time.strftime("%Y-%m-%d %H:%M:%S")
                 if result is True:
-                    print(f"[{code}] Available! Sending @everyone ping...")
+                    print(f"[{code}] Available! Sending @everyone ping...", flush=True)
                     send_availability_ping(code)
                     remaining.discard(code)
                 elif result is False:
-                    print(f"[{code}] Still taken.")
+                    print(f"[{code}] Still taken.", flush=True)
             except requests.RequestException as e:
-                print(f"[{code}] Request error: {e}")
+                print(f"[{code}] Request error: {e}", flush=True)
                 results[code] = None
 
         checks_done += 1
@@ -111,12 +127,12 @@ def watch_loop():
             try:
                 send_status_update(results)
             except requests.RequestException as e:
-                print(f"Failed to send status update: {e}")
+                print(f"Failed to send status update: {e}", flush=True)
 
         if remaining:
             time.sleep(CHECK_INTERVAL_SECONDS)
 
-    print("All watched codes have been claimed/notified.")
+    print("All watched codes have been claimed/notified.", flush=True)
 
 
 if __name__ == "__main__":
