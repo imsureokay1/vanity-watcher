@@ -1,16 +1,16 @@
 """
-Discord Vanity URL Availability Watcher (Render-ready version)
------------------------------------------------------------------
+Discord Vanity URL Availability Watcher (Render-ready version, authenticated)
+-------------------------------------------------------------------------------
 Runs a tiny web server (so Render's free tier will host it) while a
 background thread keeps polling Discord's invite-resolve endpoint for
 one or more vanity codes.
 
+- Uses an authenticated Discord bot token to avoid shared-IP rate limits.
 - Checks every CHECK_INTERVAL_SECONDS (default: 5 min).
 - Sends a STATUS UPDATE to the webhook every STATUS_UPDATE_EVERY_N_CHECKS
   checks (default: every 12th check = hourly), with no ping.
 - Sends a SEPARATE @everyone-pinging message immediately the moment a
-  code actually becomes available (this always fires right away,
-  regardless of the status update schedule).
+  code actually becomes available.
 """
 
 import os
@@ -25,17 +25,27 @@ WEBHOOK_URL = "https://discord.com/api/webhooks/1549272234005237870/pyDj7Uyca3X3
 CHECK_INTERVAL_SECONDS = 60 * 5  # 5 minutes between checks
 STATUS_UPDATE_EVERY_N_CHECKS = 12  # 12 checks * 5 min = status update every hour
 
+# The bot token is read from a Render environment variable named
+# DISCORD_BOT_TOKEN, never hardcoded here. Set it in Render's dashboard
+# under Settings -> Environment.
+BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
+
 INVITE_API = "https://discord.com/api/v10/invites/{code}"
-# A real browser User-Agent avoids some hosts getting blocked/rate-limited
-# by Discord's edge protection when requests come from datacenter IPs.
 REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/128.0 Safari/537.36",
     "Accept": "application/json",
 }
+if BOT_TOKEN:
+    REQUEST_HEADERS["Authorization"] = f"Bot {BOT_TOKEN}"
 
 app = Flask(__name__)
-status = {"last_check": None, "remaining": list(VANITY_CODES), "checks_done": 0}
+status = {
+    "last_check": None,
+    "remaining": list(VANITY_CODES),
+    "checks_done": 0,
+    "authenticated": bool(BOT_TOKEN),
+}
 
 
 @app.route("/")
@@ -46,6 +56,7 @@ def home():
         "last_check": status["last_check"],
         "checks_done": status["checks_done"],
         "status_update_every_n_checks": STATUS_UPDATE_EVERY_N_CHECKS,
+        "authenticated": status["authenticated"],
     }
 
 
@@ -69,7 +80,6 @@ def is_available(code: str):
 
 
 def send_status_update(results: dict):
-    """Send a plain status update, guaranteed NOT to ping anyone."""
     lines = []
     for code, result in results.items():
         if result is True:
@@ -81,23 +91,29 @@ def send_status_update(results: dict):
 
     payload = {
         "content": "**Vanity check update:**\n" + "\n".join(lines),
-        "allowed_mentions": {"parse": []},  # hard block on any mentions/pings
+        "allowed_mentions": {"parse": []},
     }
     r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
     r.raise_for_status()
 
 
 def send_availability_ping(code: str):
-    """Send the @everyone-pinging alert when a code frees up."""
     payload = {
         "content": f"@everyone 🎉 The vanity URL **discord.gg/{code}** is now available!",
-        "allowed_mentions": {"parse": ["everyone"]},  # explicitly allow this ping
+        "allowed_mentions": {"parse": ["everyone"]},
     }
     r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
     r.raise_for_status()
 
 
 def watch_loop():
+    if not BOT_TOKEN:
+        print(
+            "WARNING: DISCORD_BOT_TOKEN not set. Requests will be unauthenticated "
+            "and may hit shared-IP rate limits on Render.",
+            flush=True,
+        )
+
     remaining = set(VANITY_CODES)
     checks_done = 0
 
@@ -122,7 +138,6 @@ def watch_loop():
         status["checks_done"] = checks_done
         status["remaining"] = list(remaining)
 
-        # Only send the no-ping status update every Nth check
         if checks_done % STATUS_UPDATE_EVERY_N_CHECKS == 0:
             try:
                 send_status_update(results)
