@@ -25,10 +25,16 @@ WEBHOOK_URL = "https://discord.com/api/webhooks/1549272234005237870/pyDj7Uyca3X3
 CHECK_INTERVAL_SECONDS = 60 * 5  # 5 minutes between checks
 STATUS_UPDATE_EVERY_N_CHECKS = 12  # 12 checks * 5 min = status update every hour
 
-# The bot token is read from a Render environment variable named
-# DISCORD_BOT_TOKEN, never hardcoded here. Set it in Render's dashboard
-# under Settings -> Environment.
+# The bot token is read from a Render/Northflank environment variable
+# named DISCORD_BOT_TOKEN, never hardcoded here.
 BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
+
+# The residential proxy connection string is read from an environment
+# variable named PROXY_URL, in the format:
+#   http://username:password@gw.dataimpulse.com:823
+# Never hardcode this — set it in Northflank's Environment settings.
+PROXY_URL = os.environ.get("PROXY_URL", "")
+PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
 
 INVITE_API = "https://discord.com/api/v10/invites/{code}"
 REQUEST_HEADERS = {
@@ -45,6 +51,7 @@ status = {
     "remaining": list(VANITY_CODES),
     "checks_done": 0,
     "authenticated": bool(BOT_TOKEN),
+    "proxy_enabled": bool(PROXY_URL),
 }
 
 
@@ -57,6 +64,7 @@ def home():
         "checks_done": status["checks_done"],
         "status_update_every_n_checks": STATUS_UPDATE_EVERY_N_CHECKS,
         "authenticated": status["authenticated"],
+        "proxy_enabled": status["proxy_enabled"],
     }
 
 
@@ -69,12 +77,14 @@ def test_gateway():
         resp = requests.get(
             "https://discord.com/api/v10/gateway",
             headers=REQUEST_HEADERS,
-            timeout=10,
+            proxies=PROXIES,
+            timeout=15,
         )
         return {
             "endpoint": "https://discord.com/api/v10/gateway",
             "status_code": resp.status_code,
             "body": resp.text[:500],
+            "via_proxy": bool(PROXY_URL),
         }
     except requests.RequestException as e:
         return {"error": str(e)}
@@ -82,7 +92,10 @@ def test_gateway():
 
 def is_available(code: str):
     resp = requests.get(
-        INVITE_API.format(code=code), headers=REQUEST_HEADERS, timeout=10
+        INVITE_API.format(code=code),
+        headers=REQUEST_HEADERS,
+        proxies=PROXIES,
+        timeout=15,
     )
     if resp.status_code == 200:
         return False
@@ -113,7 +126,7 @@ def send_status_update(results: dict):
         "content": "**Vanity check update:**\n" + "\n".join(lines),
         "allowed_mentions": {"parse": []},
     }
-    r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
+    r = requests.post(WEBHOOK_URL, json=payload, proxies=PROXIES, timeout=15)
     r.raise_for_status()
 
 
@@ -122,7 +135,7 @@ def send_availability_ping(code: str):
         "content": f"@everyone 🎉 The vanity URL **discord.gg/{code}** is now available!",
         "allowed_mentions": {"parse": ["everyone"]},
     }
-    r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
+    r = requests.post(WEBHOOK_URL, json=payload, proxies=PROXIES, timeout=15)
     r.raise_for_status()
 
 
